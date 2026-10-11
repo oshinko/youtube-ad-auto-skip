@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Ad Auto Skip",
+  "author": "Oshinko",
+  "homepage_url": "https://github.com/oshinko/youtube-ad-auto-skip",
+  "version": "1.0.0",
+  "description": "Clicks YouTube's visible ad skip button automatically.",
+  "permissions": ["storage", "debugger"],
+  "background": {"service_worker": "background.js"},
+  "host_permissions": ["https://www.youtube.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {"default_popup": "popup.html"}
+}
