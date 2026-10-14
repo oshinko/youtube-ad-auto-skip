@@ -7,8 +7,20 @@
   // Wait for the saved preference before attempting any clicks.
   let enabled = false;
   let lastClick = -Infinity;
-  let pending = false;
+  const responseTimeoutMs = 5000;
+  let pending = null;
   let lastError = '';
+
+  function finishRequest(request, error = '') {
+    // A response can arrive after its timeout and after a new request starts.
+    if (pending !== request) return;
+    clearTimeout(request.timer);
+    pending = null;
+    if (error && error !== lastError) {
+      console.warn('[YouTube Ad Auto Skip]', error);
+    }
+    lastError = error;
+  }
 
   function isClickable(button) {
     if (!button.isConnected || !button.getClientRects().length) return false;
@@ -30,15 +42,20 @@
       .find(isClickable);
     if (!button) return;
     lastClick = now;
-    pending = true;
-    chrome.runtime.sendMessage({ type: 'skip-visible-ad' }, response => {
-      pending = false;
-      const error = chrome.runtime.lastError?.message || response?.error || '';
-      if (error && error !== lastError) {
-        console.warn('[YouTube Ad Auto Skip]', error);
-      }
-      lastError = error;
-    });
+    const request = {};
+    pending = request;
+    request.timer = setTimeout(() => {
+      finishRequest(request, 'Skip request timed out; retrying on the next check.');
+    }, responseTimeoutMs);
+    try {
+      chrome.runtime.sendMessage({ type: 'skip-visible-ad' }, response => {
+        // Read lastError even for a stale response to acknowledge Chrome's error.
+        const error = chrome.runtime.lastError?.message || response?.error || '';
+        finishRequest(request, error);
+      });
+    } catch (error) {
+      finishRequest(request, error.message || String(error));
+    }
   }
 
   chrome.storage.local.get({ enabled: true }, result => {

@@ -18,14 +18,25 @@ function button(options = {}) {
   };
 }
 
-function start(buttons, { enabled = true, deferSettings = false } = {}) {
+function start(buttons, { enabled = true, deferSettings = false, sendMessage } = {}) {
   const requests = [];
+  const callbacks = [];
+  const timers = new Map();
+  const warnings = [];
+  let nextTimerId = 0;
   let tick, onChanged, loadSettings;
   let now = 10000;
   vm.runInNewContext(source, {
     document: { querySelectorAll: () => buttons },
     getComputedStyle: element => element.style,
     Date: { now: () => now },
+    console: { warn: (...args) => warnings.push(args) },
+    setTimeout(callback, delay) {
+      const id = ++nextTimerId;
+      timers.set(id, { at: now + delay, callback });
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
     setInterval(callback, delay) {
       assert.equal(delay, 500);
       tick = callback;
@@ -35,7 +46,9 @@ function start(buttons, { enabled = true, deferSettings = false } = {}) {
         sendMessage(message, callback) {
           assert.equal(message.type, 'skip-visible-ad');
           requests.push(message);
-          callback({ clicked: true });
+          callbacks.push(callback);
+          if (sendMessage) sendMessage(callback);
+          else callback({ clicked: true });
         }
       },
       storage: {
@@ -47,9 +60,18 @@ function start(buttons, { enabled = true, deferSettings = false } = {}) {
   if (!deferSettings) loadSettings();
   return {
     requests,
+    callbacks,
+    warnings,
+    timers,
     tick,
     loadSettings,
-    advance(ms) { now += ms; tick(); },
+    advance(ms) {
+      now += ms;
+      for (const [id, timer] of Array.from(timers)) {
+        if (timer.at <= now && timers.delete(id)) timer.callback();
+      }
+      tick();
+    },
     toggle(value, area = 'local') { onChanged({ enabled: { newValue: value } }, area); }
   };
 }
@@ -107,4 +129,67 @@ test('retries at most once a second and detects buttons added later', () => {
   assert.equal(runtime.requests.length, 1);
   runtime.advance(500);
   assert.equal(runtime.requests.length, 2);
+});
+
+test('retries after a missing response without overlapping requests before timeout', () => {
+  const runtime = start([button()], { sendMessage() {} });
+  runtime.advance(4999);
+  assert.equal(runtime.requests.length, 1);
+  runtime.advance(1);
+  assert.equal(runtime.requests.length, 2);
+  assert.match(runtime.warnings[0][1], /timed out/);
+  runtime.advance(1000);
+  assert.equal(runtime.requests.length, 2);
+});
+
+test('a stale response does not release a newer pending request', () => {
+  const runtime = start([button()], { sendMessage() {} });
+  runtime.advance(5000);
+  assert.equal(runtime.requests.length, 2);
+  runtime.callbacks[0]({ clicked: true });
+  runtime.advance(1000);
+  assert.equal(runtime.requests.length, 2);
+  runtime.callbacks[1]({ clicked: true });
+  assert.equal(runtime.timers.size, 0);
+  runtime.advance(500);
+  assert.equal(runtime.requests.length, 3);
+});
+
+test('a synchronous send failure releases pending and cancels its timeout', () => {
+  const runtime = start([button()], {
+    sendMessage() { throw new Error('Extension context invalidated.'); }
+  });
+  assert.equal(runtime.timers.size, 0);
+  assert.match(runtime.warnings[0][1], /Extension context invalidated/);
+  runtime.advance(1000);
+  assert.equal(runtime.requests.length, 2);
+  assert.equal(runtime.timers.size, 0);
+  assert.equal(runtime.warnings.length, 1);
+});
+
+test('an error response releases pending immediately', () => {
+  const runtime = start([button()], {
+    sendMessage(callback) { callback({ error: 'Debugger unavailable' }); }
+  });
+  assert.equal(runtime.timers.size, 0);
+  runtime.advance(1000);
+  assert.equal(runtime.requests.length, 2);
+  assert.match(runtime.warnings[0][1], /Debugger unavailable/);
+});
+
+test('a timeout does not send a retry while the switch is off', () => {
+  const runtime = start([button()], { sendMessage() {} });
+  runtime.toggle(false);
+  runtime.advance(5000);
+  assert.equal(runtime.requests.length, 1);
+  runtime.toggle(true);
+  assert.equal(runtime.requests.length, 2);
+});
+
+test('successful responses cancel their timers', () => {
+  const runtime = start([button()]);
+  runtime.advance(5000);
+  assert.equal(runtime.requests.length, 2);
+  assert.equal(runtime.timers.size, 0);
+  assert.equal(runtime.warnings.length, 0);
 });
